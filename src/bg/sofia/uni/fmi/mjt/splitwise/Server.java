@@ -1,0 +1,147 @@
+package bg.sofia.uni.fmi.mjt.splitwise;
+
+import bg.sofia.uni.fmi.mjt.splitwise.command.Command;
+import bg.sofia.uni.fmi.mjt.splitwise.command.CommandParser;
+import bg.sofia.uni.fmi.mjt.splitwise.exception.InternalErrorException;
+import bg.sofia.uni.fmi.mjt.splitwise.repository.TransactionRepo;
+import bg.sofia.uni.fmi.mjt.splitwise.repository.UserRepo;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.nio.channels.SelectionKey;
+import java.nio.channels.Selector;
+import java.nio.channels.ServerSocketChannel;
+import java.nio.channels.SocketChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.Iterator;
+
+public class Server extends Thread {
+    private static final String USER_FILE_PATH = "resources/users.json";
+    private static final String TRANSACTION_FILE_PATH = "resources/transactions.json";
+
+    private static final String HOST = "localhost";
+
+    private static final int BUFFER_SIZE = 1024;
+    private final int port;
+    private boolean isServerWorking;
+
+    private ByteBuffer buffer;
+    private Selector selector;
+
+    public Server(int port) {
+        this.port = port;
+    }
+
+    @Override
+    public void run() {
+        try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()) {
+            selector = Selector.open();
+            registerServerChannel(serverSocketChannel, selector);
+
+            this.buffer = ByteBuffer.allocate(BUFFER_SIZE);
+
+            isServerWorking = true;
+            while (isServerWorking) {
+                try {
+                    int readyChannels = selector.select();
+                    if (readyChannels == 0) {
+                        continue;
+                    }
+
+                    Iterator<SelectionKey> keyIterator = selector.selectedKeys().iterator();
+                    while (keyIterator.hasNext()) {
+                        SelectionKey key = keyIterator.next();
+
+                        if (key.isReadable()) {
+                            SocketChannel clientChannel = (SocketChannel) key.channel();
+
+                            String clientInput = getClientInput(clientChannel);
+                            System.out.println(clientInput);
+
+                            if (clientInput == null) {
+                                continue;
+                            }
+
+                            Command cmd = CommandParser.of(clientInput, clientChannel);
+                            String output = cmd.execute();
+
+                            writeClientOutput(clientChannel, output);
+
+                        } else if (key.isAcceptable()) {
+                            accept(selector, key);
+                        }
+
+                        keyIterator.remove();
+                    }
+                } catch (IOException e) {
+                    System.out.println("Error occurred while processing client request: " + e.getMessage());
+                    throw new InternalErrorException(
+                        "Error occurred while processing client request: " + e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            throw new InternalErrorException("Failed to start server", e);
+        }
+    }
+
+    public void stopRunning() {
+        this.isServerWorking = false;
+        if (selector.isOpen()) {
+            selector.wakeup();
+        }
+    }
+
+    private void registerServerChannel(ServerSocketChannel channel, Selector selector) throws IOException {
+        channel.bind(new InetSocketAddress(HOST, this.port));
+        channel.configureBlocking(false);
+        channel.register(selector, SelectionKey.OP_ACCEPT);
+    }
+
+    private String getClientInput(SocketChannel clientChannel) throws IOException {
+        buffer.clear();
+
+        int readBytes = clientChannel.read(buffer);
+
+        if (readBytes < 0) {
+            System.out.println("Client has closed the connection");
+            clientChannel.close();
+            return null;
+        }
+
+        buffer.flip();
+
+        byte[] clientInputBytes = new byte[buffer.remaining()];
+        buffer.get(clientInputBytes);
+
+        return new String(clientInputBytes, StandardCharsets.UTF_8);
+    }
+
+    private void writeClientOutput(SocketChannel clientChannel, String output) throws IOException {
+        buffer.clear();
+        buffer.put(output.getBytes());
+        buffer.flip();
+
+        clientChannel.write(buffer);
+    }
+
+    private void accept(Selector selector, SelectionKey key) throws IOException {
+        ServerSocketChannel sockChannel = (ServerSocketChannel) key.channel();
+        SocketChannel accept = sockChannel.accept();
+
+        accept.configureBlocking(false);
+        accept.register(selector, SelectionKey.OP_READ);
+    }
+
+
+    public void load() {
+        UserRepo.getInstance().load(USER_FILE_PATH);
+        TransactionRepo.getInstance().load(TRANSACTION_FILE_PATH);
+    }
+
+    public void save() {
+        UserRepo.getInstance().save(USER_FILE_PATH);
+        TransactionRepo.getInstance().save(TRANSACTION_FILE_PATH);
+    }
+
+}
